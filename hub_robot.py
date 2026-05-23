@@ -5,18 +5,22 @@
 #   Left drive motor:      Port C
 #   Right drive motor:     Port D
 #   Distance sensor:       Port E
-#
-# No scoop motor is connected right now.
+#   Sweeper motor:         Port F
 #
 # Commands from laptop bridge are 3 bytes:
 #   fwd = short forward
+#   flg = longer forward
 #   bak = short backward
 #   lft = short left turn
 #   rgt = short right turn
 #   stp = stop
 #   dst = report distance
 #   aln = scan left/center/right and turn toward nearest object
-#   psh = approach and push
+#   swp = run sweeper briefly
+#   s18 = spin 180 degrees
+#   s36 = spin 360 degrees
+#   sch = search one full spin and face nearest object
+#   sas = search, approach, sweep, and dead-reckon home
 #   bye = exit program
 
 from pybricks.hubs import PrimeHub
@@ -35,9 +39,21 @@ hub = PrimeHub()
 # Port C = motor
 # Port D = motor
 # Port E = distance sensor
+# Port F = Technic Large Angular Motor for sweeper
 left_motor = Motor(Port.C, Direction.COUNTERCLOCKWISE)
 right_motor = Motor(Port.D)
 eyes = UltrasonicSensor(Port.E)
+sweep_motor = Motor(Port.F)
+
+SWEEP_SPEED = -350
+SWEEP_MS = 500
+ALIGN_ANGLE = 20
+ALIGN_NO_OBJECT_MM = 1900
+SEARCH_STEP_DEGREES = 30
+SEARCH_SWEEP_MAX_STEPS = 15
+SEARCH_SWEEP_DETECT_MM = 300
+SEARCH_SWEEP_SWEEP_MM = 80
+SEARCH_SWEEP_ALIGN_STOP_MM = 200
 
 # Tune axle_track later if turning is inaccurate.
 robot = DriveBase(
@@ -71,30 +87,57 @@ def dist_mm():
         return 2000
 
 
+def stable_dist_mm():
+    best = 2000
+    for _ in range(3):
+        d = dist_mm()
+        if d < best:
+            best = d
+        wait(40)
+    return best
+
+
 def stop():
     robot.stop()
+    sweep_motor.stop()
 
 
-def scan_and_align():
+def start_sweeper():
+    sweep_motor.run(SWEEP_SPEED)
+
+
+def stop_sweeper():
+    sweep_motor.stop()
+
+
+def sweep(report=True):
+    start_sweeper()
+    wait(SWEEP_MS)
+    stop_sweeper()
+    if report:
+        send("OK:SWP")
+
+
+def scan_and_align(report=True):
     """
     Simple alignment:
     1. Read distance straight ahead.
-    2. Turn left 30 degrees and read.
-    3. Turn right 60 degrees and read.
+    2. Turn left and read.
+    3. Turn right and read.
     4. Face the direction with the closest object.
     """
 
-    center = dist_mm()
+    center = stable_dist_mm()
 
-    robot.turn(-30)
+    robot.turn(-ALIGN_ANGLE)
     wait(100)
-    left = dist_mm()
+    left = stable_dist_mm()
 
-    robot.turn(60)
+    robot.turn(ALIGN_ANGLE * 2)
     wait(100)
-    right = dist_mm()
+    right = stable_dist_mm()
 
-    # Robot is now facing +30 degrees from original center.
+    # Robot is now facing +ALIGN_ANGLE degrees from original center.
     readings = [
         ("left", left),
         ("center", center),
@@ -102,59 +145,97 @@ def scan_and_align():
     ]
 
     best_name, best_val = min(readings, key=lambda x: x[1])
+    scan_report = "L%s:C%s:R%s" % (left, center, right)
 
     # If nothing was seen, return to center and report no object.
-    if best_val >= 1900:
-        robot.turn(-30)
-        send("OK:ALN:NO_OBJECT")
-        return
+    if best_val >= ALIGN_NO_OBJECT_MM:
+        robot.turn(-ALIGN_ANGLE)
+        if report:
+            send("OK:ALN:NO_OBJECT:%s" % scan_report)
+        return False, best_name, best_val
 
     if best_name == "left":
-        # Current heading is +30. Left target was -30.
-        robot.turn(-60)
+        # Current heading is +ALIGN_ANGLE. Left target was -ALIGN_ANGLE.
+        robot.turn(-(ALIGN_ANGLE * 2))
 
     elif best_name == "center":
-        # Current heading is +30. Center target was 0.
-        robot.turn(-30)
+        # Current heading is +ALIGN_ANGLE. Center target was 0.
+        robot.turn(-ALIGN_ANGLE)
 
     else:
         # Already facing the right target.
         pass
 
-    send("OK:ALN:%s:%s" % (best_name, best_val))
+    if report:
+        send("OK:ALN:%s:%s:%s" % (best_name, best_val, scan_report))
+    return True, best_name, best_val
 
 
-def approach_and_push():
-    """
-    Approach the nearest object and push it forward.
-    This is the no-scoop-motor version.
-    """
+def search(report=True):
+    steps = 360 // SEARCH_STEP_DEGREES
+    best_step = 0
+    best_dist = 2000
 
-    # Approach in short chunks.
-    for _ in range(10):
-        d = dist_mm()
+    for step in range(steps):
+        d = stable_dist_mm()
+        if d < best_dist:
+            best_dist = d
+            best_step = step
 
-        if d < 100:
-            break
+        robot.turn(SEARCH_STEP_DEGREES)
 
-        robot.straight(70)
-        wait(50)
+    if best_dist >= ALIGN_NO_OBJECT_MM:
+        if report:
+            send("OK:SCH:NO_OBJECT:%s" % best_dist)
+        return False, 0, best_dist
 
-    # Push/corral the object.
-    robot.straight(180)
-    wait(100)
+    best_angle = best_step * SEARCH_STEP_DEGREES
+    robot.turn(best_angle)
+    if report:
+        send("OK:SCH:%s:%s" % (best_angle, best_dist))
+    return True, best_angle, best_dist
 
-    # Back up so the demo looks complete.
-    robot.straight(-120)
-    stop()
 
-    send("OK:PSH:%s" % dist_mm())
+def search_and_sweep(max_steps=SEARCH_SWEEP_MAX_STEPS):
+    steps_taken = 0
+
+    while steps_taken < max_steps:
+        robot.straight(300)
+        steps_taken += 1
+
+        found, _direction, distance = scan_and_align(report=False)
+
+        if found and distance <= SEARCH_SWEEP_DETECT_MM:
+            approach_steps = 0
+            while distance > SEARCH_SWEEP_ALIGN_STOP_MM and approach_steps < max_steps:
+                robot.straight(120)
+                approach_steps += 1
+                found, _direction, distance = scan_and_align(report=False)
+                if not found:
+                    break
+
+            robot.straight(300)
+            sweep(report=False)
+
+            robot.turn(180)
+            for _ in range(steps_taken):
+                robot.straight(300)
+
+            robot.turn(360)
+            send("OK:SAS:COMPLETE:%s:%s" % (steps_taken, distance))
+            return
+
+    send("OK:SAS:FAILED:%s" % steps_taken)
 
 
 def run_command(cmd):
     if cmd == b"fwd":
         robot.straight(120)
         send("OK:FWD")
+
+    elif cmd == b"flg":
+        robot.straight(300)
+        send("OK:FLG")
 
     elif cmd == b"bak":
         robot.straight(-120)
@@ -178,12 +259,26 @@ def run_command(cmd):
     elif cmd == b"aln":
         scan_and_align()
 
-    elif cmd == b"psh":
-        approach_and_push()
+    elif cmd == b"swp":
+        sweep()
+
+    elif cmd == b"s18":
+        robot.turn(180)
+        send("OK:S18")
+
+    elif cmd == b"s36":
+        robot.turn(360)
+        send("OK:S36")
+
+    elif cmd == b"sch":
+        search()
+
+    elif cmd == b"sas":
+        search_and_sweep()
 
     else:
         stop()
-        send("ERR:UNKNOWN")
+        send("ERR:UNKNOWN:%s" % cmd.decode(errors="replace"))
 
 
 send("BOOT")

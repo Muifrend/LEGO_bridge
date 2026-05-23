@@ -36,14 +36,18 @@ PYBRICKS_COMMAND_EVENT_CHAR_UUID = "c5f50002-8280-46da-89f4-6d8051e4aeef"
 
 COMMAND_MAP: Dict[str, bytes] = {
     "FORWARD": b"fwd",
+    "FORWARD_LONG": b"flg",
     "BACKUP": b"bak",
     "LEFT": b"lft",
     "RIGHT": b"rgt",
     "STOP": b"stp",
     "DISTANCE": b"dst",
     "ALIGN": b"aln",
-    "PUSH": b"psh",
-    "ALIGN_AND_PUSH": b"aln",  # bridge sends aln then psh
+    "SWEEP": b"swp",
+    "SPIN_180": b"s18",
+    "SPIN_360": b"s36",
+    "SEARCH": b"sch",
+    "SEARCH_AND_SWEEP": b"sas",
     "BYE": b"bye",
 }
 
@@ -109,12 +113,18 @@ class HubBridge:
             return
         if data[0] == 0x01:
             payload = bytes(data[1:])
-            text = payload.decode(errors="replace")
-            if payload == b"rdy":
+
+            if b"rdy" in payload:
+                before_ready, _after_ready = payload.split(b"rdy", 1)
+                if before_ready:
+                    self.last_message = before_ready.decode(errors="replace")
+                    print(f"[hub] {self.last_message}")
                 self.ready_event.set()
-            else:
-                self.last_message = text
-                print(f"[hub] {text}")
+                return
+
+            text = payload.decode(errors="replace")
+            self.last_message = text
+            print(f"[hub] {text}")
 
     async def send_raw(self, code: bytes) -> str:
         if self.mock:
@@ -146,18 +156,6 @@ class HubBridge:
         command_name = command_name.upper().strip()
         if command_name not in COMMAND_MAP:
             raise ValueError(f"Unknown command: {command_name}")
-
-        if command_name == "ALIGN_AND_PUSH":
-            align_result = await self.send_raw(b"aln")
-            push_result = await self.send_raw(b"psh")
-            return {
-                "ok": True,
-                "command": command_name,
-                "steps": [
-                    {"sent": "ALIGN", "hub_response": align_result},
-                    {"sent": "PUSH", "hub_response": push_result},
-                ],
-            }
 
         code = COMMAND_MAP[command_name]
         result = await self.send_raw(code)

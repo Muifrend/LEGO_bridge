@@ -11,7 +11,7 @@
 # Then in another terminal:
 #   curl -X POST http://localhost:8000/robot/command \
 #     -H "Content-Type: application/json" \
-#     -d '{"command":"ALIGN_AND_PUSH"}'
+#     -d '{"command":"SEARCH_AND_SWEEP"}'
 
 import argparse
 import asyncio
@@ -163,7 +163,7 @@ class HubBridge:
 
 
 def build_app(bridge: HubBridge) -> FastAPI:
-    app = FastAPI(title="Poop Patrol LEGO Bridge", version="0.1.0")
+    app = FastAPI(title="Trash Patrol LEGO Bridge", version="0.1.0")
 
     @app.on_event("startup")
     async def startup():
